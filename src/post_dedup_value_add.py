@@ -246,6 +246,63 @@ def entry_published_ts(e):
     except: pass
     return None
 
+def determine_article_type(c, client):
+    """
+    記事のタイプを判定する（Type A, B, C）
+
+    Type A: 実践的なノウハウ・ハウツーが書ける内容
+    Type B: ハウツー記事を紹介できる内容
+    Type C: ニュースまとめとして書く内容
+
+    Returns:
+        str: "howto_creation", "howto_introduction", "news_summary"
+    """
+    prompt = f"""以下のニュースを読んで、どのタイプの記事が最適か判定してください。
+
+タイトル: {c["title"]}
+要約: {c["summary"]}
+
+【判定基準】
+Type A (howto_creation):
+- この情報をもとに、読者が実践できる具体的なノウハウやハウツーを書ける
+- 新機能の使い方、設定方法、実装手順などを解説できる
+- 具体的な「やり方」を教えられる内容
+
+Type B (howto_introduction):
+- この記事の元ネタ自体が、ハウツーやノウハウを含んでいる
+- その記事を紹介・要約することで読者に価値を提供できる
+- 元記事のチュートリアルやガイドを日本語で紹介する形
+
+Type C (news_summary):
+- 発表、ニュース、レポートなどの速報的な内容
+- 「何が起きたか」を伝えるのが主目的
+- 実践的なノウハウよりも情報の伝達が重要
+
+以下のいずれかのみを返答してください（説明不要）:
+- howto_creation
+- howto_introduction
+- news_summary"""
+
+    try:
+        msg = create_message_with_fallback(
+            client,
+            system="記事タイプ判定器。指定された3つのタイプのいずれかのみを返す。",
+            messages=[{"role":"user","content":prompt}],
+            max_tokens=20,
+            temperature=0.0
+        )
+        txt = "".join([p.text for p in msg.content if p.type=="text"]).strip().lower()
+
+        if "howto_creation" in txt:
+            return "howto_creation"
+        elif "howto_introduction" in txt:
+            return "howto_introduction"
+        else:
+            return "news_summary"
+    except Exception as e:
+        print(f"[警告] 記事タイプ判定に失敗: {e}")
+        return "news_summary"  # デフォルトはニュースまとめ
+
 def score_candidate(c, sel, client):
     W = sel["weights"]
     now = time.time()
@@ -278,11 +335,21 @@ def score_candidate(c, sel, client):
         vir=float(m[0]) if m else 0.5
     except Exception:
         vir=0.5
+
+    # 記事タイプを判定してボーナスを追加
+    article_type = determine_article_type(c, client)
+    c["article_type"] = article_type  # 後で使用するために保存
+
+    # config.yamlから記事タイプボーナスを取得
+    type_bonuses = CFG.get("generate", {}).get("content_strategy", {}).get("article_type_priority", {})
+    type_bonus = type_bonuses.get(article_type, 0.0)
+
     score = (W["freshness"]*freshness +
              W["source"]*( (src_w-0.8)/0.4*0.5 ) +
              W["language"]*lang_score +
              W["keyword"]*kw_score +
-             W["llm_virality"]*vir)
+             W["llm_virality"]*vir +
+             type_bonus)  # 記事タイプボーナスを追加
     return max(0.0, min(1.0, score))
 
 def pick_candidates(top_n=5):
@@ -349,58 +416,191 @@ def pick_candidates(top_n=5):
     top_candidates = [item[1] for item in scored[:top_n]]
     return top_candidates, posted_urls, domain_last, fp_list
 
-def main():
-    WP_URL=(ENV.get("WP_URL","") or "").rstrip("/")+"/"
-    WP_USER=(ENV.get("WP_USER","") or "")
-    WP_PASS=(ENV.get("WP_APP_PASSWORD","") or "")
-    if not (WP_URL and WP_USER and WP_PASS):
-        raise SystemExit("WP接続情報不足")
-    wp_cfg=(CFG.get("wordpress") or {})
-    cats=wp_cfg.get("category_ids") or []
-    status=wp_cfg.get("status","publish")
+def create_article_prompt(article_type, best, article_content):
+    """
+    記事タイプに応じたプロンプトを生成する
 
-    # 複数の候補を取得（上位5件）
-    candidates, posted_urls, domain_last, fp_list = pick_candidates(top_n=5)
-    if not candidates:
-        print("未投稿の候補が見つかりません。終了。"); return
+    Args:
+        article_type: "howto_creation", "howto_introduction", "news_summary"
+        best: 候補記事の情報
+        article_content: 元記事の本文
 
-    print(f"\n{len(candidates)}件の候補記事を取得しました。")
+    Returns:
+        str: 生成用プロンプト
+    """
+    # 共通のFAQセクション
+    faq_section = """
+5. FAQ（必須）
+<h3>よくある質問</h3>
 
-    client=Anthropic(api_key=ENV.get("ANTHROPIC_API_KEY"))
-    system="""あなたは技術ニュースライターです。
+<p><strong>Q1. （質問文）</strong></p>
+<p>A1. （回答文: Yes/Noまたは結論から開始、80-150文字）</p>
 
-【記事作成の原則】
-- ニュース記事として事実を正確に伝える
-- 専門知識のない読者でも理解できるよう丁寧に説明する
-- 読者にとっての意味や影響を明示する
+<p><strong>Q2. （質問文）</strong></p>
+<p>A2. （回答文）</p>
 
-【文章ルール】
-- 1文は20語以内を目安に、短く簡潔に
-- 1段落は3-5文以内
-- 専門用語は初出時に必ず説明（「○○とは、～のことです」）
-- 具体的な数値・日付・固有名詞を使う
-- 曖昧な表現を避ける
+<p><strong>Q3. （質問文）</strong></p>
+<p>A3. （回答文）</p>
 
-【HTMLタグ】
-- h1, h3, p, ul, li, div, strong, em, codeのみ使用
-- コードブロックマーカー（```html など）は絶対に出力しない
-- HTMLタグの外にテキストを書かない"""
+【FAQの作成ルール】
+- 実際にこの記事を読んだ人が次に抱く疑問を質問にすること
+- 質問は記事本文に書かれていない内容か、より深く知りたい内容であること
+- 回答の冒頭は必ず「Yes/No」または結論から始めること
+- 回答は80〜150文字に収めること
+- 専門用語が出た場合はカッコ内で簡単に説明を加えること
 
-    # 候補を順に試す
-    for idx, best in enumerate(candidates, 1):
-        print(f"\n{'='*70}")
-        print(f"候補 {idx}/{len(candidates)}: {best['title'][:60]}...")
-        print(f"{'='*70}")
+6. 出典
+<div class="source"><strong>出典：</strong>【元記事タイトル】（【ドメイン】）</div>"""
 
-        # 元記事の本文を取得
-        print("\n[元記事を取得中...]")
-        article_content = fetch_article_content(best['link'])
-        if article_content:
-            print(f"✅ 元記事を取得しました（{len(article_content)}文字）")
-        else:
-            print("⚠️ 元記事の取得に失敗。RSS要約のみで生成します。")
+    article_content_section = f"""
+元記事情報：
+- タイトル: {best['title']}
+- リンク: {best['link']}
+- 要約: {best['summary']}
+- ドメイン: {best['domain']}
+- 言語: {best['lang']}
+{f'''
+元記事本文：
+{article_content}
+''' if article_content else '（元記事本文の取得に失敗したため、要約のみを参照してください）'}
 
-        user=f"""以下の元記事から、わかりやすい日本語ニュース記事を作成してください。
+HTMLのみで出力してください。Markdown禁止。コードブロックマーカーは使用禁止。"""
+
+    if article_type == "howto_creation":
+        # Type A: 実践的なハウツー記事作成
+        return f"""以下の情報をもとに、読者が実践できる具体的なハウツー記事を作成してください。
+
+【記事構成】
+
+1. メタディスクリプション（120字以内）
+<p data-meta="description">【何ができるか】【どのように使うか】【メリット1文】</p>
+
+2. タイトル（H1、50-60文字）
+<h1>【実践できる内容を明示】</h1>
+
+3. リード段落（300-400字）
+<p>
+【第1文】何ができるようになったのか
+【第2-3文】この機能・手法の概要と特徴
+【第4-5文】誰が使うべきか、どんな場面で役立つか
+【第6文】この記事で学べること
+</p>
+
+4. 本文（H3見出しで整理、全体で1,500-2,000字）
+
+<h3>【機能・手法の概要】</h3>
+<p>
+・どんな機能・手法なのか
+・従来の方法との違い
+・利用可能な条件（APIアクセス、必要なツールなど）
+</p>
+
+<h3>具体的な使い方・実装手順</h3>
+<p>
+【ステップ1】【具体的な手順】
+【ステップ2】【具体的な手順】
+【ステップ3】【具体的な手順】
+
+各ステップで注意すべきポイントや、設定項目の説明を含める。
+専門用語は「○○とは、～のことです」の形で説明。
+</p>
+
+<h3>実践のコツと注意点</h3>
+<p>
+・うまく使うためのヒント
+・よくある失敗と回避方法
+・パフォーマンスやコストの考慮事項
+</p>
+
+<h3>活用事例とユースケース</h3>
+<p>
+【具体例1】【どんな場面で】【どう使うか】
+【具体例2】【どんな場面で】【どう使うか】
+
+実際にどのような場面で役立つかを具体的に。
+</p>
+
+{faq_section}
+
+【重要な指示】
+- 読者が実際に試せる具体的な手順を含めること
+- 抽象的な説明ではなく、実践的なノウハウを提供すること
+- 専門用語には必ず説明と具体例をつけること
+- 手順は明確で分かりやすく
+
+{article_content_section}"""
+
+    elif article_type == "howto_introduction":
+        # Type B: ハウツー記事紹介
+        return f"""以下の元記事には実践的なハウツーやノウハウが含まれています。その内容を日本語で分かりやすく紹介する記事を作成してください。
+
+【記事構成】
+
+1. メタディスクリプション（120字以内）
+<p data-meta="description">【どんなハウツーか】【誰向けか】【主な内容1文】</p>
+
+2. タイトル（H1、50-60文字）
+<h1>【紹介するハウツーの内容を明示】</h1>
+
+3. リード段落（300-400字）
+<p>
+【第1文】どんなハウツー・ガイドが公開されたか
+【第2-3文】誰が公開し、何を目的としているか
+【第4-5文】このガイドで学べる主な内容
+【第6文】どんな人に役立つか
+</p>
+
+4. 本文（H3見出しで整理、全体で1,500-2,000字）
+
+<h3>このガイドについて</h3>
+<p>
+・誰が公開したガイドか
+・どんな目的・背景で作られたか
+・どのレベルの読者を対象としているか
+</p>
+
+<h3>ガイドの主な内容</h3>
+<p>
+元記事で紹介されている主なトピックを要約：
+・【トピック1】【概要】
+・【トピック2】【概要】
+・【トピック3】【概要】
+
+特に重要なポイントや、実践的な部分を詳しく紹介。
+</p>
+
+<h3>注目すべきポイント</h3>
+<p>
+このガイドで特に参考になる部分：
+・【ポイント1】
+・【ポイント2】
+・【ポイント3】
+
+実務で活用できるヒントや、見落としがちな重要事項。
+</p>
+
+<h3>こんな人におすすめ</h3>
+<p>
+・【対象者1】【理由】
+・【対象者2】【理由】
+・【対象者3】【理由】
+
+このガイドを読むべき人と、得られるメリット。
+</p>
+
+{faq_section}
+
+【重要な指示】
+- 元記事のハウツー内容を正確に紹介すること
+- 読者がこのガイドから何を学べるかを明確にすること
+- 元記事へのリンクを出典として必ず記載すること
+- 専門用語には必ず説明をつけること
+
+{article_content_section}"""
+
+    else:  # news_summary
+        # Type C: ニュースまとめ（現行と同じ）
+        return f"""以下の元記事から、わかりやすい日本語ニュース記事を作成してください。
 
 【記事構成】
 
@@ -461,8 +661,7 @@ def main():
 ただし、【注意点や留意事項】。
 </p>
 
-5. 出典
-<div class="source"><strong>出典：</strong>【元記事タイトル】（【ドメイン】）</div>
+{faq_section}
 
 【重要な指示】
 - リード段落は特に丁寧に、300-400字かけて説明する
@@ -471,18 +670,69 @@ def main():
 - 「できること・できないこと」「影響」は文章形式
 - 専門用語には必ず説明と具体例をつける
 
-元記事情報：
-- タイトル: {best['title']}
-- リンク: {best['link']}
-- 要約: {best['summary']}
-- ドメイン: {best['domain']}
-- 言語: {best['lang']}
-{f'''
-元記事本文：
-{article_content}
-''' if article_content else '（元記事本文の取得に失敗したため、要約のみを参照してください）'}
+{article_content_section}"""
 
-HTMLのみで出力してください。Markdown禁止。コードブロックマーカーは使用禁止。""".strip()
+def main():
+    WP_URL=(ENV.get("WP_URL","") or "").rstrip("/")+"/"
+    WP_USER=(ENV.get("WP_USER","") or "")
+    WP_PASS=(ENV.get("WP_APP_PASSWORD","") or "")
+    if not (WP_URL and WP_USER and WP_PASS):
+        raise SystemExit("WP接続情報不足")
+    wp_cfg=(CFG.get("wordpress") or {})
+    cats=wp_cfg.get("category_ids") or []
+    status=wp_cfg.get("status","publish")
+
+    # 複数の候補を取得（上位5件）
+    candidates, posted_urls, domain_last, fp_list = pick_candidates(top_n=5)
+    if not candidates:
+        print("未投稿の候補が見つかりません。終了。"); return
+
+    print(f"\n{len(candidates)}件の候補記事を取得しました。")
+
+    client=Anthropic(api_key=ENV.get("ANTHROPIC_API_KEY"))
+    system="""あなたは技術ニュースライターです。
+
+【記事作成の原則】
+- ニュース記事として事実を正確に伝える
+- 専門知識のない読者でも理解できるよう丁寧に説明する
+- 読者にとっての意味や影響を明示する
+
+【文章ルール】
+- 1文は20語以内を目安に、短く簡潔に
+- 1段落は3-5文以内
+- 専門用語は初出時に必ず説明（「○○とは、～のことです」）
+- 具体的な数値・日付・固有名詞を使う
+- 曖昧な表現を避ける
+
+【HTMLタグ】
+- h1, h3, p, ul, li, div, strong, em, codeのみ使用
+- コードブロックマーカー（```html など）は絶対に出力しない
+- HTMLタグの外にテキストを書かない"""
+
+    # 候補を順に試す
+    for idx, best in enumerate(candidates, 1):
+        print(f"\n{'='*70}")
+        print(f"候補 {idx}/{len(candidates)}: {best['title'][:60]}...")
+        print(f"{'='*70}")
+
+        # 元記事の本文を取得
+        print("\n[元記事を取得中...]")
+        article_content = fetch_article_content(best['link'])
+        if article_content:
+            print(f"✅ 元記事を取得しました（{len(article_content)}文字）")
+        else:
+            print("⚠️ 元記事の取得に失敗。RSS要約のみで生成します。")
+
+        # 記事タイプに応じたプロンプトを生成
+        article_type = best.get('article_type', 'news_summary')
+        type_labels = {
+            'howto_creation': 'Type A (実践的ハウツー作成)',
+            'howto_introduction': 'Type B (ハウツー記事紹介)',
+            'news_summary': 'Type C (ニュースまとめ)'
+        }
+        print(f"\n📝 記事タイプ: {type_labels.get(article_type, article_type)}")
+
+        user = create_article_prompt(article_type, best, article_content)
 
         print("\n[記事生成中...]")
         msg=create_message_with_fallback(client, system=system, messages=[{"role":"user","content":user}])

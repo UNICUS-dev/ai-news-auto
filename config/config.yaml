@@ -2,7 +2,7 @@ run_switch: true
 schedule:
   times_jst:
   - 09:00
-  - '19:00'
+  # - '19:00'  # 夕方の投稿を停止（朝1本のみに変更）
 claude:
   models:
     # Primary model (優先モデル)
@@ -137,6 +137,12 @@ generate:
   summary_bullets: 5
   body_target_chars: 2000  # より詳しい説明のため増加
   meta_description_chars: 120
+  # 記事タイプ優先順位設定
+  content_strategy:
+    article_type_priority:
+      howto_creation: 0.5      # Type A: 実践的なハウツー記事作成のボーナス
+      howto_introduction: 0.3   # Type B: ハウツー記事紹介のボーナス
+      news_summary: 0.0         # Type C: ニュースまとめ（現行）のボーナス
   # 実用性重視設定
   practical_focus:
     include_implementation_steps: true
