@@ -1,7 +1,7 @@
 run_switch: true
 schedule:
   times_jst:
-  - 09:00
+  - 07:00
   # - '19:00'  # 夕方の投稿を停止（朝1本のみに変更）
 claude:
   models:
