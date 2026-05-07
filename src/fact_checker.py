@@ -217,6 +217,20 @@ def fact_check_article(source_item: Dict, generated_html: str) -> Dict:
             if word not in generated_text:
                 warnings.append(f"タイトルの '{word}' が本文で説明されていません")
 
+    # 7. FAQセクションの存在チェック
+    faq_section = re.search(r'よくある質問', generated_html, re.IGNORECASE)
+    if not faq_section:
+        issues.append("FAQセクション（よくある質問）が見つかりません")
+    else:
+        # Q1, Q2, Q3 の存在チェック
+        for i in range(1, 4):
+            q_pattern = re.compile(rf'Q{i}\.', re.IGNORECASE)
+            a_pattern = re.compile(rf'A{i}\.', re.IGNORECASE)
+            if not q_pattern.search(generated_html):
+                issues.append(f"FAQ質問{i}（Q{i}）が見つかりません")
+            if not a_pattern.search(generated_html):
+                issues.append(f"FAQ回答{i}（A{i}）が見つかりません")
+
     # 判定
     passed = len(issues) == 0
 
