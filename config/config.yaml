@@ -58,7 +58,7 @@ selection:
   max_scan_per_feed: 10
   candidate_limit: 50
   ja_priority: 1.0
-  en_priority: 0.8
+  en_priority: 0.9  # 日本語偏重を緩和（0.8→0.9）
   # セール・商業記事の除外キーワード
   excluded_keywords:
   - Black Friday
@@ -120,7 +120,15 @@ selection:
     arstechnica.com: 1.0
     technologyreview.com: 1.0
     venturebeat.com: 0.9
-  domain_cooldown_days: 1
+    ainow.ai: 0.85       # AINOW偏重を抑制
+    itmedia.co.jp: 1.0
+    ledge.ai: 0.95
+  domain_cooldown_days: 7  # 同一ソース連投を防ぐため1→7日に延長
+  # ソース多様性: 直近N日で同一ドメインの投稿上限
+  source_diversity:
+    window_days: 30
+    max_per_domain: 2      # 30日間で同一ドメインは最大2本
+    penalty_per_post: 0.15 # 既出1本ごとにスコアを逓減
   dup_window_days: 7
   weights:
     freshness: 0.3
@@ -135,7 +143,7 @@ generate:
   title_max_len: 62
   lead_max_chars: 180
   summary_bullets: 5
-  body_target_chars: 2000  # より詳しい説明のため増加
+  body_target_chars: 3000  # 核心の解説を省略させないため増加（2000→3000）
   meta_description_chars: 120
   # 記事タイプ優先順位設定
   content_strategy:
