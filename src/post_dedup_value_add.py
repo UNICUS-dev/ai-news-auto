@@ -133,19 +133,16 @@ def mark_domain(domain, domain_last):
     if domain: domain_last[domain]=time.time()
 
 def load_domain_history():
-    """直近の投稿履歴 [{"domain":..., "ts":...}, ...] を返す"""
     d=load_json(DOMAIN_HISTORY_PATH)
     return d.get("items", []) if isinstance(d, dict) else []
 
 def append_domain_history(domain):
     items=load_domain_history()
     items.append({"domain":domain, "ts":time.time()})
-    # 直近400件まで保持
     if len(items)>400: items=items[-400:]
     save_json(DOMAIN_HISTORY_PATH, {"items":items})
 
 def domain_post_count(domain, history, window_days):
-    """window_days以内に同一ドメインが投稿された本数"""
     cutoff=time.time()-window_days*86400
     return sum(1 for it in history if it.get("domain")==domain and it.get("ts",0)>=cutoff)
 
@@ -255,6 +252,31 @@ def safe_html_cleanup(html):
     html=re.sub(r"</?([a-zA-Z0-9]+)(\s+[^>]*)?>", noattrs, html)
     if len(html)>12000: html=html[:12000]+"…"
     return html
+
+def generate_slug(title: str, client) -> str:
+    try:
+        msg = create_message_with_fallback(
+            client,
+            system="URLスラッグ生成器。英語スラッグのみを返す。",
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"以下の日本語記事タイトルを、SEOに適した英語のURLスラッグに変換してください。\n"
+                    f"ルール: 小文字・ハイフン区切り・3〜6単語・英数字とハイフンのみ・記事の主要キーワードを含める\n"
+                    f"スラッグのみを返してください。説明不要。\n\n"
+                    f"タイトル: {title}"
+                )
+            }],
+            max_tokens=50,
+            temperature=0.0
+        )
+        slug = "".join([p.text for p in msg.content if p.type == "text"]).strip().lower()
+        slug = re.sub(r'[^a-z0-9-]', '-', slug)
+        slug = re.sub(r'-+', '-', slug).strip('-')
+        return slug if slug else "ai-news"
+    except Exception as e:
+        print(f"[警告] スラッグ生成に失敗: {e}")
+        return "ai-news"
 
 def entry_published_ts(e):
     try:
@@ -424,7 +446,6 @@ def pick_candidates(top_n=5):
             dom=urlparse(link).netloc
             if not domain_ok(dom, domain_last, cooldown):
                 continue
-            # ソース多様性: 直近window内で同一ドメインが上限に達していれば除外
             if div_max is not None and domain_post_count(dom, domain_history, div_window) >= div_max:
                 continue
             ts=entry_published_ts(e)
@@ -436,7 +457,6 @@ def pick_candidates(top_n=5):
     scored=[]
     for c in cands:
         s=score_candidate(c, sel, client)
-        # ソース多様性ペナルティ: 直近window内の既出本数に応じてスコアを逓減
         recent_n=domain_post_count(c["domain"], domain_history, div_window)
         s=max(0.0, s - div_penalty*recent_n)
         scored.append((s,c))
@@ -825,8 +845,11 @@ def main():
         mt=re.search(r"<h1[^>]*>(.*?)</h1>", html, flags=re.I|re.S)
         title=re.sub(r"<[^>]+>","",mt.group(1)).strip()[:62] if mt else "(自動生成)AIニュース"
 
+        slug = generate_slug(title, client)
+        print(f"スラッグ: {slug}")
+
         url=urljoin(WP_URL,"wp-json/wp/v2/posts")
-        payload={"title":title,"content":html,"status":status,"categories":cats,"excerpt":meta}
+        payload={"title":title,"content":html,"status":status,"categories":cats,"excerpt":meta,"slug":slug}
 
         # アイキャッチ画像をランダム選択
         featured_img_id = select_featured_image()
