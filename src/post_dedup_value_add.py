@@ -278,6 +278,85 @@ def generate_slug(title: str, client) -> str:
         print(f"[警告] スラッグ生成に失敗: {e}")
         return "ai-news"
 
+COURSES = [
+    ("https://unicus.top/gas_automation_seminor/",    "GASで始める超速・自動化入門（Eラーニング講座）",  ["自動化","GAS","Apps Script","スクリプト","業務効率","RPA","ワークフロー","スプレッドシート","効率化"]),
+    ("https://unicus.top/rag_seminor/",               "NotebookLMで始めるAI業務改革（Eラーニング講座）", ["RAG","NotebookLM","社内資料","ナレッジ","知識","検索拡張","ドキュメント"]),
+    ("https://unicus.top/prompt_engineering_seminor/","プロンプトエンジニアリング研修（Eラーニング講座）",  ["プロンプト","ChatGPT","Claude","生成AI","文章生成","画像生成","LLM","対話"]),
+    ("https://unicus.top/think_prompt_seminar/",      "思考×プロンプト基礎研修（Eラーニング講座）",      ["思考","論理","フレームワーク","問題解決"]),
+]
+
+def _pick_course(haystack):
+    best=None; best_score=0
+    for url, label, kws in COURSES:
+        score=sum(haystack.count(k) for k in kws)
+        if score>best_score:
+            best_score=score; best=(url,label)
+    return best if best_score>=2 else None
+
+def _first_post(api, auth, params, used, exclude_slug):
+    try:
+        rr=requests.get(api, params=params, auth=auth, timeout=20)
+        for it in (rr.json() if rr.status_code==200 else []):
+            if it.get("slug")==exclude_slug:
+                continue
+            t=re.sub(r"<[^>]+>","",(it.get("title",{}) or {}).get("rendered","")).strip()
+            l=it.get("link","")
+            if t and l and l not in used:
+                used.add(l)
+                return (l,t)
+    except Exception:
+        pass
+    return None
+
+def build_related_links_block(wp_url, wp_user, wp_pass, cats, haystack="", exclude_slug=""):
+    """内部リンク3本(新着 / 同カテゴリ / Eラーニング講座)のブロックを生成。
+    講座は本文内容にキーワード一致した場合のみ。一致が弱ければ別の関連記事で代替。"""
+    try:
+        api=urljoin(wp_url, "wp-json/wp/v2/posts")
+        auth=HTTPBasicAuth(wp_user, wp_pass)
+        cat_param=",".join(str(c) for c in cats) if cats else None
+        used=set(); links=[]
+        # 1) 新着（全体で最新）
+        r1=_first_post(api, auth, {"per_page":3,"orderby":"date","status":"publish","_fields":"title,link,slug"}, used, exclude_slug)
+        if r1: links.append(r1)
+        # 2) 同カテゴリ（最新）
+        if cat_param:
+            r2=_first_post(api, auth, {"categories":cat_param,"per_page":4,"orderby":"date","status":"publish","_fields":"title,link,slug"}, used, exclude_slug)
+            if r2: links.append(r2)
+        # 3) Eラーニング講座（内容一致）／弱ければ関連記事で代替
+        course=_pick_course(haystack)
+        if course:
+            links.append(course)
+        else:
+            params={"per_page":6,"orderby":"date","status":"publish","_fields":"title,link,slug"}
+            if cat_param: params["categories"]=cat_param
+            r3=_first_post(api, auth, params, used, exclude_slug)
+            if r3: links.append(r3)
+        if not links:
+            return ""
+        lis="".join('<li><a href="%s">%s</a></li>' % (l, t) for l, t in links)
+        return '\n<h3>関連記事・おすすめ講座</h3>\n<ul class="unicus-related">' + lis + '</ul>\n'
+    except Exception as e:
+        print("[警告] 関連リンク生成に失敗: %s" % e)
+        return ""
+
+def generate_focus_keyphrase(title, summary, client):
+    """SEO用フォーカスキーフレーズをLLMで生成"""
+    try:
+        msg = create_message_with_fallback(
+            client,
+            system="SEOのフォーカスキーフレーズ生成器。日本語で2〜4語の簡潔なキーフレーズのみを返す。記号や説明は不要。",
+            messages=[{"role": "user", "content": "次の記事の主題を表すSEOフォーカスキーフレーズを1つだけ返してください。\nタイトル: %s\n要約: %s" % (title, (summary or "")[:200])}],
+            max_tokens=30,
+            temperature=0.0,
+        )
+        kw = "".join([c.text for c in msg.content if c.type == "text"]).strip()
+        kw = re.sub(r"\s+", " ", kw).strip("「」\"'　 ")
+        return kw[:60]
+    except Exception as e:
+        print("[警告] キーフレーズ生成に失敗: %s" % e)
+        return ""
+
 def entry_published_ts(e):
     try:
         from time import mktime
@@ -848,8 +927,19 @@ def main():
         slug = generate_slug(title, client)
         print(f"スラッグ: {slug}")
 
+        # ① 関連記事の内部リンクを本文末尾に付与（safe_html_cleanup後なので<a>が残る）
+        related_block = build_related_links_block(WP_URL, WP_USER, WP_PASS, cats, haystack=(title + " " + re.sub(r"<[^>]+>", "", html)), exclude_slug=slug)
+        if related_block:
+            html = html + related_block
+            print("関連記事リンクを追加しました")
+
+        # ② Yoast フォーカスキーフレーズを生成
+        focuskw = generate_focus_keyphrase(title, best.get("summary", ""), client)
+        print("フォーカスキーフレーズ: %s" % focuskw)
+
         url=urljoin(WP_URL,"wp-json/wp/v2/posts")
-        payload={"title":title,"content":html,"status":status,"categories":cats,"excerpt":meta,"slug":slug}
+        payload={"title":title,"content":html,"status":status,"categories":cats,"excerpt":meta,"slug":slug,
+                 "meta":{"_yoast_wpseo_metadesc": meta, "_yoast_wpseo_focuskw": focuskw}}
 
         # アイキャッチ画像をランダム選択
         featured_img_id = select_featured_image()
