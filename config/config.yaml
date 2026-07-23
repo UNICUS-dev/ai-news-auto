@@ -124,6 +124,19 @@ selection:
     itmedia.co.jp: 1.0
     ledge.ai: 0.95
   domain_cooldown_days: 7  # 同一ソース連投を防ぐため1→7日に延長
+  # 時事性・ニュース性の担保（2026-07-16の汎用記事採用を受けて追加）
+  max_article_age_days: 4          # 公開から4日より古い記事は候補から除外
+  max_per_domain_per_run: 2        # 1回の実行で同一ドメインの候補は最大2件
+  non_news_title_patterns:         # 常設まとめ/エバーグリーンSEO記事を除外（正規表現）
+    - '\d+\s*選'
+    - 'おすすめ'
+    - 'とは[?？。・…\s（(]'
+    - 'まとめ'
+    - '完全ガイド'
+    - '徹底解説'
+    - '総まとめ'
+    - '何ができる'
+    - 'できること'
   # ソース多様性: 直近N日で同一ドメインの投稿上限
   source_diversity:
     window_days: 30
@@ -131,10 +144,10 @@ selection:
     penalty_per_post: 0.15 # 既出1本ごとにスコアを逓減
   dup_window_days: 7
   weights:
-    freshness: 0.3
+    freshness: 0.45
     source: 0.15
     language: 0.1
-    keyword: 0.25
+    keyword: 0.2
     llm_virality: 0.3
 translate:
   enabled: true
