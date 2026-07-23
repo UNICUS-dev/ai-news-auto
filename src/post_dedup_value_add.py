@@ -146,6 +146,32 @@ def domain_post_count(domain, history, window_days):
     cutoff=time.time()-window_days*86400
     return sum(1 for it in history if it.get("domain")==domain and it.get("ts",0)>=cutoff)
 
+import re as _re_nn
+_NON_NEWS_DEFAULT = [
+    r"\d+\s*選",          # 「8選」「12選」等のまとめ
+    r"おすすめ",
+    r"とは[?？。・…\s（(]",   # 「〜とは？」等の定義記事
+    r"まとめ",
+    r"完全ガイド",
+    r"徹底解説",
+    r"総まとめ",
+    r"何ができる",
+    r"できること",
+    r"比較\s*\d",
+]
+def is_non_news(title, patterns=None):
+    """常設まとめ/エバーグリーンSEO記事のタイトルパターンを検出"""
+    pats = patterns if patterns else _NON_NEWS_DEFAULT
+    t = title or ""
+    for pat in pats:
+        try:
+            if _re_nn.search(pat, t):
+                return True
+        except _re_nn.error:
+            if pat in t:
+                return True
+    return False
+
 def clean_for_fingerprint(text:str)->str:
     t=strip_html(text)
     t=t.lower()
@@ -494,6 +520,10 @@ def pick_candidates(top_n=5):
     div_max=div.get("max_per_domain",2)
     div_penalty=div.get("penalty_per_post",0.15)
     domain_history=load_domain_history()
+    max_age_days=sel.get("max_article_age_days")          # これより古い記事は除外
+    max_per_run=sel.get("max_per_domain_per_run", 2)       # 1実行内の同一ドメイン上限
+    non_news_patterns=sel.get("non_news_title_patterns")   # 未指定なら既定パターン
+    per_run_domain={}
     excluded_keywords=sel.get("excluded_keywords",[])
     client=Anthropic(api_key=ENV.get("ANTHROPIC_API_KEY"))
     cands=[]
@@ -520,6 +550,10 @@ def pick_candidates(top_n=5):
             if is_excluded:
                 continue
 
+            # ニュースでない常設まとめ/エバーグリーン記事を除外
+            if is_non_news(title, non_news_patterns):
+                continue
+
             if is_near_duplicate(title, summary, fp_list, sha1_dup=True, simhash_thresh=3, title_sim=0.92):
                 continue
             dom=urlparse(link).netloc
@@ -528,6 +562,13 @@ def pick_candidates(top_n=5):
             if div_max is not None and domain_post_count(dom, domain_history, div_window) >= div_max:
                 continue
             ts=entry_published_ts(e)
+            # 時事性の足切り: 公開日が分かる かつ 古すぎる場合は除外
+            if max_age_days and ts and (time.time()-ts) > max_age_days*86400:
+                continue
+            # 1実行内の同一ドメイン候補を上限まで
+            if per_run_domain.get(dom,0) >= max_per_run:
+                continue
+            per_run_domain[dom]=per_run_domain.get(dom,0)+1
             lang=guess_lang((title+" "+summary)[:1000])
             cands.append({"title":title,"link":link,"summary":summary,"domain":dom,"ts":ts,"lang":lang,"source":d.feed.get("title",url)})
             if len(cands)>=cand_limit: break
